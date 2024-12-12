@@ -2,77 +2,66 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
 
+	"github.com/abahmed/kwatch/alertmanager"
+	"github.com/abahmed/kwatch/client"
+	"github.com/abahmed/kwatch/config"
 	"github.com/abahmed/kwatch/constant"
-	"github.com/abahmed/kwatch/controller"
+	"github.com/abahmed/kwatch/handler"
+	"github.com/abahmed/kwatch/pvcmonitor"
+	"github.com/abahmed/kwatch/storage/memory"
 	"github.com/abahmed/kwatch/upgrader"
-	"github.com/abahmed/kwatch/util"
+	"github.com/abahmed/kwatch/version"
+	"github.com/abahmed/kwatch/watcher"
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
 )
 
 func main() {
-	logrus.Infof(fmt.Sprintf(constant.WelcomeMsg, constant.Version))
-
-	// initialize configuration
-	configFile := os.Getenv("CONFIG_FILE")
-	if len(configFile) == 0 {
-		configFile = filepath.Join("config.yaml")
+	config, err := config.LoadConfig()
+	if err != nil {
+		logrus.Fatalf("failed to load config: %s", err.Error())
 	}
-	viper.SetConfigFile(configFile)
-	viper.AutomaticEnv()
+	setLogFormatter(config.App.LogFormatter)
 
-	// if a config file is found, read it in.
-	if err := viper.ReadInConfig(); err == nil {
-		logrus.Infof("using config file: %s", viper.ConfigFileUsed())
-	} else {
-		logrus.Warnf("unable to load config file: %s", err.Error())
+	logrus.Infof(fmt.Sprintf(constant.WelcomeMsg, version.Short()))
+
+	// create kubernetes client
+	client := client.Create(&config.App)
+
+	alertManager := alertmanager.AlertManager{}
+	alertManager.Init(config.Alert, &config.App)
+
+	if !config.App.DisableStartupMessage {
+		// send notification to providers
+		alertManager.Notify(fmt.Sprintf(constant.WelcomeMsg, version.Short()))
 	}
-
-	// get providers
-	providers := util.GetProviders()
 
 	// check and notify if newer versions are available
-	if !viper.GetBool("disableUpdateCheck") {
-		go upgrader.CheckUpdates(providers)
-	}
+	upgrader := upgrader.NewUpgrader(&config.Upgrader, &alertManager)
+	go upgrader.CheckUpdates()
 
-	// Parse namespace allow/forbid lists
-	namespaceAllowList := make([]string, 0)
-	namespaceForbidList := make([]string, 0)
-	for _, namespace := range viper.GetStringSlice("namespaces") {
-		if clean := strings.TrimPrefix(namespace, "!"); namespace != clean {
-			namespaceForbidList = append(namespaceForbidList, clean)
-			continue
-		}
-		namespaceAllowList = append(namespaceAllowList, namespace)
-	}
-	if len(namespaceAllowList) > 0 && len(namespaceForbidList) > 0 {
-		logrus.Fatal("Either allowed or forbidden namespaces must be set. Can't set both")
-	}
+	// start monitoring Persistent Volume Claims
+	pvcMonitor :=
+		pvcmonitor.NewPvcMonitor(client, &config.PvcMonitor, &alertManager)
+	go pvcMonitor.Start()
 
-	// Parse reason allow/forbid lists
-	reasonAllowList := make([]string, 0)
-	reasonForbidList := make([]string, 0)
-	for _, namespace := range viper.GetStringSlice("reasons") {
-		if clean := strings.TrimPrefix(namespace, "!"); namespace != clean {
-			reasonForbidList = append(reasonForbidList, clean)
-			continue
-		}
-		reasonAllowList = append(reasonAllowList, namespace)
-	}
-	if len(reasonAllowList) > 0 && len(reasonForbidList) > 0 {
-		logrus.Fatal("Either allowed or forbidden reasons must be set. Can't set both")
-	}
+	// Create handler
+	h := handler.NewHandler(
+		client,
+		config,
+		memory.NewMemory(),
+		&alertManager,
+	)
 
-	ignoreContainerList := make([]string, 0)
-	for _, container := range viper.GetStringSlice("ignoreContainerNames") {
-		ignoreContainerList = append(ignoreContainerList, container)
-	}
+	// start watcher
+	watcher.Start(client, config, h)
+}
 
-	// start controller
-	controller.Start(providers, viper.GetBool("ignoreFailedGracefulShutdown"), namespaceAllowList, namespaceForbidList, reasonAllowList, reasonForbidList, ignoreContainerList)
+func setLogFormatter(formatter string) {
+	switch formatter {
+	case "json":
+		logrus.SetFormatter(&logrus.JSONFormatter{})
+	default:
+		logrus.SetFormatter(&logrus.TextFormatter{})
+	}
 }

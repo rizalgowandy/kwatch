@@ -1,220 +1,218 @@
 package util
 
 import (
+	"errors"
+	"math/rand"
 	"testing"
 
-	"github.com/abahmed/kwatch/event"
-	"github.com/spf13/viper"
-	testclient "k8s.io/client-go/kubernetes/fake"
+	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
+	"k8s.io/client-go/kubernetes/fake"
+
+	k8stesting "k8s.io/client-go/testing"
 )
 
-func TestIsStrInSlice(t *testing.T) {
+func TestGetPodContainerLogs(t *testing.T) {
+	assert := assert.New(t)
+
+	client := fake.NewSimpleClientset()
+	logs := GetPodContainerLogs(
+		client,
+		"test",
+		"test",
+		"default",
+		false,
+		20)
+
+	assert.Equal(logs, "fake logs")
+}
+
+func TestJsonEscape(t *testing.T) {
+	assert := assert.New(t)
+
 	testCases := []struct {
-		str    string
-		list   []string
-		output bool
+		Input  string
+		Output string
 	}{
 		{
-			str:    "hello",
-			list:   []string{"hello", "world"},
-			output: true,
+			Input:  "test",
+			Output: "test",
 		},
 		{
-			str:    "test",
-			list:   []string{"hello", "world"},
-			output: false,
+			Input:  "te\bst",
+			Output: "te\\bst",
 		},
 		{
-			str:    "hello",
-			list:   []string{},
-			output: false,
+			Input:  "\b",
+			Output: "\\b",
+		},
+		{
+			Input:  "\"",
+			Output: "\\\"",
 		},
 	}
 
 	for _, tc := range testCases {
-		out := IsStrInSlice(tc.str, tc.list)
-		if out != tc.output {
-			t.Fatalf(
-				"search %s in %v: returned %t expected %t",
-				tc.str,
-				tc.list,
-				out,
-				tc.output)
-		}
+		assert.Equal(JsonEscape(tc.Input), tc.Output)
 	}
 }
 
 func TestGetPodEventsStr(t *testing.T) {
-	client := testclient.NewSimpleClientset()
+	assert := assert.New(t)
 
-	podName := "test-pod"
-	events := GetPodEventsStr(client, podName, "default")
-	if len(events) > 0 {
-		t.Fatalf(
-			"get events for %s: returned %s expected %s",
-			podName,
-			events,
-			"")
+	event := v1.Event{
+		Reason:        "test reason",
+		Message:       "test message",
+		LastTimestamp: metav1.Now(),
 	}
+
+	result := GetPodEventsStr(&[]v1.Event{event})
+	expectedOutput :=
+		"[" + event.LastTimestamp.String() + "] " + event.Reason + " " +
+			event.Message
+	assert.Equal(result, expectedOutput)
 }
 
-func TestGetPodContainerLogs(t *testing.T) {
-	client := testclient.NewSimpleClientset()
-	viper.SetDefault("maxRecentLogLines", 20)
-	podName := "test"
-	containerName := "test"
-	logs := GetPodContainerLogs(client, podName, containerName, "default", false)
-	if logs != "fake logs" {
-		t.Fatalf(
-			"get logs for %s in %s: returned %s expected %s",
-			containerName,
-			podName,
-			logs,
-			"")
-	}
+func TestGetPodEventsStrNil(t *testing.T) {
+	assert := assert.New(t)
+
+	result := GetPodEventsStr(nil)
+	expectedOutput := ""
+	assert.Equal(result, expectedOutput)
 }
 
-func TestIsListAllBool(t *testing.T) {
-	testCases := []struct {
-		boolean bool
-		list    []bool
-		output  bool
-	}{
-		{
-			boolean: true,
-			list:    []bool{true, true},
-			output:  true,
-		},
-		{
-			boolean: false,
-			list:    []bool{false, false},
-			output:  true,
-		},
-		{
-			boolean: true,
-			list:    []bool{false, true},
-			output:  false,
-		},
-		{
-			boolean: true,
-			list:    []bool{},
-			output:  true,
-		},
-	}
+func TestContainsKillingStoppingContainerEvents(t *testing.T) {
+	assert := assert.New(t)
 
-	for _, tc := range testCases {
-		out := IsListAllBool(tc.boolean, tc.list)
-		if out != tc.output {
-			t.Fatalf(
-				"IsListAllBool %t in %v: returned %t expected %t",
-				tc.boolean,
-				tc.list,
-				out,
-				tc.output)
-		}
-	}
+	cli := fake.NewSimpleClientset()
+	cli.PrependReactor(
+		"list",
+		"events",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, &v1.EventList{
+				Items: []v1.Event{{
+					Reason:        "killing",
+					Message:       "test stopping container",
+					LastTimestamp: metav1.Now(),
+				}},
+			}, nil
+		})
+
+	result :=
+		ContainsKillingStoppingContainerEvents(
+			cli,
+			"dummy-app-579f7cd745-t6fdg",
+			"test")
+
+	assert.True(result)
 }
 
-func TestGetProviders(t *testing.T) {
-	alertMap := map[string]interface{}{
-		"slack": map[string]interface{}{
-			"webhook": "test",
-		},
-		"pagerduty": map[string]interface{}{
-			"integrationkey": "test",
-		},
-		"discord": map[string]interface{}{
-			"webhook": "test",
-		},
-		"telegram": map[string]interface{}{
-			"token":  "test",
-			"chatid": "test",
-		},
-		"teams": map[string]interface{}{
-			"webhook": "test",
-		},
-		"mattermost": map[string]interface{}{
-			"webhook": "test",
-		},
-		"opsgenie": map[string]interface{}{
-			"apiKey": "test",
-		},
-	}
-	viper.SetDefault("alert", alertMap)
+func TestContainsKillingStoppingContainerEventsError(t *testing.T) {
+	assert := assert.New(t)
 
-	providers := GetProviders()
-	if len(providers) != len(alertMap) {
-		t.Fatalf(
-			"get providers returned %d expected %d",
-			len(providers),
-			len(alertMap))
-	}
+	cli := fake.NewSimpleClientset()
+	cli.PrependReactor(
+		"list",
+		"events",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("ssss")
+		})
+
+	result :=
+		ContainsKillingStoppingContainerEvents(
+			cli,
+			"dummy-app-579f7cd745-t6fdg",
+			"test")
+
+	assert.False(result)
 }
 
-func TestSendProvidersEvent(t *testing.T) {
-	alertMap := map[string]interface{}{
-		"slack": map[string]interface{}{
-			"webhook": "test",
-		},
-		"pagerduty": map[string]interface{}{
-			"integrationkey": "test",
-		},
-		"discord": map[string]interface{}{
-			"webhook": "test",
-		},
-		"telegram": map[string]interface{}{
-			"token":  "test",
-			"chatid": "test",
-		},
-		"teams": map[string]interface{}{
-			"webhook": "test",
-		},
-		"rocketchat": map[string]interface{}{
-			"webhook": "test",
-		},
-		"mattermost": map[string]interface{}{
-			"webhook": "test",
-		},
-		"opsgenie": map[string]interface{}{
-			"apiKey": "test",
-		},
-	}
-	viper.SetDefault("alert", alertMap)
-	providers := GetProviders()
+func TestContainsKillingStoppingContainerEmpty(t *testing.T) {
+	assert := assert.New(t)
 
-	SendProvidersEvent(providers, event.Event{})
+	cli := fake.NewSimpleClientset()
+	cli.PrependReactor(
+		"list",
+		"events",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, &v1.EventList{
+				Items: []v1.Event{},
+			}, nil
+		})
+
+	result :=
+		ContainsKillingStoppingContainerEvents(
+			cli,
+			"dummy-app-579f7cd745-t6fdg",
+			"test")
+
+	assert.False(result)
 }
 
-func TestSendProvidersMsg(t *testing.T) {
-	alertMap := map[string]interface{}{
-		"slack": map[string]interface{}{
-			"webhook": "test",
-		},
-		"pagerduty": map[string]interface{}{
-			"integrationkey": "test",
-		},
-		"discord": map[string]interface{}{
-			"webhook": "test",
-		},
-		"telegram": map[string]interface{}{
-			"token":  "test",
-			"chatid": "test",
-		},
-		"teams": map[string]interface{}{
-			"webhook": "test",
-		},
-		"rocketchat": map[string]interface{}{
-			"webhook": "test",
-		},
-		"mattermost": map[string]interface{}{
-			"webhook": "test",
-		},
-		"opsgenie": map[string]interface{}{
-			"apiKey": "test",
-		},
-	}
-	viper.SetDefault("alert", alertMap)
-	providers := GetProviders()
+func TestRandomString(t *testing.T) {
+	assert := assert.New(t)
 
-	SendProvidersMsg(providers, "hello world!")
+	randLen := rand.Intn(300)
+	result := RandomString(randLen)
+
+	assert.Len(result, randLen)
+}
+
+func TestGetNodes(t *testing.T) {
+	assert := assert.New(t)
+
+	cli := fake.NewSimpleClientset()
+	node := v1.Node{}
+	cli.PrependReactor(
+		"list",
+		"nodes",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, &v1.NodeList{
+				Items: []v1.Node{node},
+			}, nil
+		})
+
+	result, err := GetNodes(cli)
+	assert.NoError(err)
+	assert.NotNil(result)
+	assert.Equal(len(result.Items), 1)
+}
+
+func TestGetPVNameFromPVC(t *testing.T) {
+	assert := assert.New(t)
+
+	cli := fake.NewSimpleClientset()
+	cli.PrependReactor(
+		"get",
+		"persistentvolumeclaims",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, &v1.PersistentVolumeClaim{
+				Spec: v1.PersistentVolumeClaimSpec{
+					VolumeName: "test",
+				},
+			}, nil
+		})
+
+	result, err := GetPVNameFromPVC(cli, "test", "test")
+	assert.NoError(err)
+	assert.Equal(result, "test")
+}
+
+func TestGetPVNameFromPVCError(t *testing.T) {
+	assert := assert.New(t)
+
+	cli := fake.NewSimpleClientset()
+	cli.PrependReactor(
+		"get",
+		"persistentvolumeclaims",
+		func(action k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("failed")
+		})
+
+	result, err := GetPVNameFromPVC(cli, "test", "test")
+	assert.Error(err, "failed")
+	assert.Equal(result, "")
 }
