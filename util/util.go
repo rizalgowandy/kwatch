@@ -4,30 +4,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strings"
+	"time"
 
-	"github.com/abahmed/kwatch/event"
-
-	"github.com/abahmed/kwatch/provider"
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
 	v1 "k8s.io/api/core/v1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"k8s.io/client-go/kubernetes"
 )
 
 // GetPodEventsStr returns formatted events as a string for specified pod
-func GetPodEventsStr(c kubernetes.Interface, name, namespace string) string {
-	events, err := getPodEvents(c, name, namespace)
-
-	eventsString := ""
-	if err != nil {
-		logrus.Warnf("failed to get events for %s@%s: %s", name, namespace, err.Error())
-		return eventsString
+func GetPodEventsStr(events *[]v1.Event) string {
+	if events == nil {
+		return ""
 	}
 
-	for _, ev := range events.Items {
+	eventsString := ""
+
+	for _, ev := range *events {
 		eventsString +=
 			fmt.Sprintf(
 				"[%s] %s %s\n",
@@ -39,17 +36,23 @@ func GetPodEventsStr(c kubernetes.Interface, name, namespace string) string {
 	return strings.TrimSpace(eventsString)
 }
 
-// ContainsKillingStoppingContainerEvents checks if the events contain an event with "Killing Stopping container" which
-// indicates that a container could not be gracefully shutdown
-func ContainsKillingStoppingContainerEvents(c kubernetes.Interface, name, namespace string) bool {
-	events, err := getPodEvents(c, name, namespace)
+// ContainsKillingStoppingContainerEvents checks if the events contain an event
+// with "Killing Stopping container" which indicates that a container could not
+// be gracefully shutdown
+func ContainsKillingStoppingContainerEvents(
+	c kubernetes.Interface,
+	name,
+	namespace string) bool {
+	events, err := GetPodEvents(c, name, namespace)
 	if err != nil {
 		return false
 	}
 
 	for _, ev := range events.Items {
 		if strings.ToLower(ev.Reason) == "killing" &&
-			strings.Contains(strings.ToLower(ev.Message), "stopping container") {
+			strings.Contains(
+				strings.ToLower(ev.Message),
+				"stopping container") {
 			return true
 		}
 	}
@@ -60,24 +63,20 @@ func ContainsKillingStoppingContainerEvents(c kubernetes.Interface, name, namesp
 // GetPodContainerLogs returns logs for specified container in pod
 func GetPodContainerLogs(
 	c kubernetes.Interface, name, container, namespace string,
-	previous bool) string {
+	previous bool,
+	maxRecentLogLines int64) string {
 	options := v1.PodLogOptions{
 		Container: container,
 		Previous:  previous,
 	}
 
 	// get max recent log lines
-	var maxLogs int64 = viper.GetInt64("maxRecentLogLines")
-	if maxLogs != 0 {
-		options.TailLines = &maxLogs
+	if maxRecentLogLines != 0 {
+		options.TailLines = &maxRecentLogLines
 	}
 
 	// get logs
-	logs, err := c.CoreV1().
-		Pods(namespace).
-		GetLogs(name, &options).
-		DoRaw(context.TODO())
-
+	logs, err := getContainerLogs(c, name, namespace, &options)
 	if err != nil {
 		logrus.Warnf(
 			"failed to get logs for container %s in pod %s@%s: %s",
@@ -104,7 +103,21 @@ func GetPodContainerLogs(
 	return string(logs)
 }
 
-func getPodEvents(c kubernetes.Interface, name, namespace string) (*v1.EventList, error) {
+func getContainerLogs(
+	c kubernetes.Interface,
+	name string,
+	namespace string,
+	options *v1.PodLogOptions) ([]byte, error) {
+	return c.CoreV1().
+		Pods(namespace).
+		GetLogs(name, options).
+		DoRaw(context.TODO())
+}
+
+func GetPodEvents(
+	c kubernetes.Interface,
+	name,
+	namespace string) (*v1.EventList, error) {
 	return c.CoreV1().
 		Events(namespace).
 		List(context.TODO(), metav1.ListOptions{
@@ -112,100 +125,59 @@ func getPodEvents(c kubernetes.Interface, name, namespace string) (*v1.EventList
 		})
 }
 
-// GetProviders returns slice of provider objects after parsing config
-func GetProviders() []provider.Provider {
-	var providers []provider.Provider
-	const isPresent = false
-	telegram := []bool{isPresent, isPresent}
-
-	for key, value := range viper.Get("alert").(map[string]interface{}) {
-		for c, v := range value.(map[string]interface{}) {
-			if key == "slack" && c == "webhook" && len(strings.TrimSpace(v.(string))) > 0 {
-				providers = append(providers, provider.NewSlack(viper.GetString("alert.slack.webhook")))
-			}
-			if key == "pagerduty" && c == "integrationkey" && len(strings.TrimSpace(v.(string))) > 0 {
-				providers = append(providers, provider.NewPagerDuty(viper.GetString("alert.pagerduty.integrationKey")))
-			}
-			if key == "discord" && c == "webhook" && len(strings.TrimSpace(v.(string))) > 0 {
-				providers = append(providers, provider.NewDiscord(viper.GetString("alert.discord.webhook")))
-			}
-			if key == "telegram" && c == "token" && len(strings.TrimSpace(v.(string))) > 0 {
-				telegram[0] = true
-			}
-			if key == "telegram" && c == "chatid" && len(strings.TrimSpace(v.(string))) > 0 {
-				telegram[1] = true
-			}
-			if key == "teams" && c == "webhook" && len(strings.TrimSpace(v.(string))) > 0 {
-				providers = append(providers, provider.NewTeams(viper.GetString("alert.teams.webhook")))
-			}
-			if key == "rocketchat" && c == "webhook" && len(strings.TrimSpace(v.(string))) > 0 {
-				providers = append(providers, provider.NewRocketChat(viper.GetString("alert.rocketchat.webhook")))
-			}
-			if key == "mattermost" && c == "webhook" && len(strings.TrimSpace(v.(string))) > 0 {
-				providers = append(providers, provider.NewMattermost(viper.GetString("alert.mattermost.webhook")))
-			}
-			if key == "opsgenie" && c == "apikey" && len(strings.TrimSpace(v.(string))) > 0 {
-				providers = append(providers, provider.NewOpsgenie(viper.GetString("alert.opsgenie.apikey")))
-			}
-		}
-		if key == "telegram" && IsListAllBool(true, telegram) {
-			providers = append(providers, provider.NewTelegram(viper.GetString("alert.telegram.token"), viper.GetString("alert.telegram.chatId")))
-		}
-	}
-
-	return providers
+// GetNodes gets a list of nodes
+func GetNodes(c kubernetes.Interface) (*v1.NodeList, error) {
+	return c.CoreV1().
+		Nodes().
+		List(context.TODO(), metav1.ListOptions{})
 }
 
-// SendProvidersMsg sends string msg to all providers
-func SendProvidersMsg(p []provider.Provider, msg string) {
-	logrus.Infof("sending message: %s", msg)
-	for _, prv := range p {
-		err :=
-			prv.SendMessage(msg)
-		if err != nil {
-			logrus.Errorf(
-				"failed to send msg with %s: %s",
-				prv.Name(),
-				err.Error())
-		}
-	}
+// // GetNodeSummary gets a list of nodes
+func GetNodeSummary(c kubernetes.Interface, name string) ([]byte, error) {
+	return c.CoreV1().
+		RESTClient().
+		Get().
+		Resource("nodes").
+		Name(name).
+		SubResource("proxy").
+		Suffix("stats/summary").
+		DoRaw(context.TODO())
 }
 
-// SendProvidersEvent sends event to all providers
-func SendProvidersEvent(p []provider.Provider, event event.Event) {
-	logrus.Infof("sending event: %+v", event)
-	for _, prv := range p {
-		if err := prv.SendEvent(&event); err != nil {
-			logrus.Errorf(
-				"failed to send event with %s: %s",
-				prv.Name(),
-				err.Error(),
-			)
-		}
+// GetPVNameFromPVC returns the name of persistent volume given a namespace and
+// persistent volume claim name
+func GetPVNameFromPVC(
+	c kubernetes.Interface,
+	namespace, pvcName string) (string, error) {
+	pvc, err :=
+		c.CoreV1().
+			PersistentVolumeClaims(namespace).
+			Get(context.TODO(), pvcName, metav1.GetOptions{})
+	if err != nil {
+		return "", err
 	}
+
+	return pvc.Spec.VolumeName, nil
 }
 
-// IsStrInSlice checks if string is existing in a slice of string
-func IsStrInSlice(str string, strList []string) bool {
-	if len(strList) == 0 {
-		return false
-	}
+// JsonEscape escapes the json special characters in a string
+func JsonEscape(i string) string {
+	jm, _ := json.Marshal(i)
 
-	for _, s := range strList {
-		if s == str {
-			return true
-		}
-	}
-
-	return false
+	s := string(jm)
+	return s[1 : len(s)-1]
 }
 
-// IsListAllBool checks if all elements in a boolean list have the same value
-func IsListAllBool(v bool, l []bool) bool {
-	for _, x := range l {
-		if x != v {
-			return false
-		}
+// RandomString generates random string with provided n size
+func RandomString(n int) string {
+	const availableCharacterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLM" +
+		"NOPQRSTUVWXYZ0123456789"
+
+	b := make([]byte, n)
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for i := range b {
+		b[i] = availableCharacterBytes[r.Intn(len(availableCharacterBytes))]
 	}
-	return true
+
+	return string(b)
 }
