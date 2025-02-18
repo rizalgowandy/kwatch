@@ -10,25 +10,21 @@ jobs:
     name: Check
     runs-on: ubuntu-latest
     steps:
-    - name: Install Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: '1.18'
-
     - name: Checkout code
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
           ref: ${{ github.ref }}
-
+    - name: Install Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24'
     - name: Build
       run: go build
-
     - name: Test
       run: go test -race --coverprofile=coverage.txt --covermode=atomic ./...
-
     - name: Upload coverage to Codecov
       if: success() && github.ref == 'refs/heads/main'
-      uses: codecov/codecov-action@v1
+      uses: codecov/codecov-action@v5
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         fail_ci_if_error: false
